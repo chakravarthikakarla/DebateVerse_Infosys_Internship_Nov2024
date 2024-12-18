@@ -4,9 +4,11 @@ const db = () => {
   mongoose
     .connect(process.env.DATABASE_URL)
     .then(() => {
-      console.log("database connected");
+      console.log("Database connected successfully.");
     })
-    .catch((err) => console.log("db connection failed"));
+    .catch((err) => {
+      console.error("Database connection error:", err);
+    });
 };
 
 module.exports = db;
