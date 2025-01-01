@@ -77,6 +77,24 @@ const Navbar = () => {
               >
                 Admin Dashboard
               </NavLink>
+              <NavLink
+                to="/userdebates"
+                className={({ isActive }) =>
+                  isActive ? "bg-white rounded-xl px-3" : "text-white"
+                }
+                onClick={toggleMenu}
+              >
+                Manage Debates
+              </NavLink>
+              <NavLink
+                to="/manageusers"
+                className={({ isActive }) =>
+                  isActive ? "bg-white rounded-xl px-3" : "text-white"
+                }
+                onClick={toggleMenu}
+              >
+                Manage Users
+              </NavLink>
               <button onClick={logout}>
                 <LogOut className="text-white" />
               </button>

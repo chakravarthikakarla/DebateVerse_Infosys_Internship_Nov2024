@@ -11,7 +11,6 @@ const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 const mongoURI = process.env.MONGO_URI;
-const jwtSecret = process.env.JWT_SECRET;
 const emailUser = process.env.EMAIL_USER;
 const emailPass = process.env.EMAIL_PASS;
 const adminemail = process.env.EMAIL_ADMIN;
@@ -47,6 +46,7 @@ app.post('/register', async (req, res) => {
       username,
       email,
       password: hashedPassword,
+      joinedDate: Date.now(),
       role: email === adminemail ? 'admin' : 'user',
       isVerified: false,
     });
@@ -54,7 +54,11 @@ app.post('/register', async (req, res) => {
     await newUser.save();
 
     let newUsername = new User({
-      username
+      username,
+      email,
+      totalDebatesCreated: 0, 
+      totalVotes: 0, 
+      joinedDate: newUser.joinedDate,
     });
     await newUsername.save();
 
@@ -115,37 +119,43 @@ app.get('/verify-email', async (req, res) => {
 // Login Route
 app.post('/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password} = req.body;
     let exist = await Registeruser.findOne({ email });
+    let user = await User.findOne({email})
+
     if (!exist) {
       return res.status(400).send('USER_NOT_FOUND');
     }
+
+    if (user.isblocked) {
+      return res.status(400).send('USER_BLOCKED');
+    }
+
     if (!exist.isVerified) {
       return res.status(400).send('Email not verified');
     }
+
     const isMatch = await bcrypt.compare(password, exist.password);
     if (!isMatch) {
       return res.status(400).send('PASSWORD_MISSMATCH');
     }
 
-    
     let payload = {
       user: {
         id: exist.id,
-        role: exist.role, 
+        role: exist.role,
         username: exist.username,
       },
     };
 
-    
     jwt.sign(payload, 'jwtSecret', { expiresIn: 3600000 }, (error, token) => {
       if (error) throw error;
-      return res.json({ token, role: exist.role ,username: exist.username }); 
+      return res.json({ token, role: exist.role, username: exist.username });
     });
   } catch (error) {
     console.log(error);
-     
-     if (error.message.includes('ECONNREFUSED') || error.message.includes('ENOTFOUND')) {
+
+    if (error.message.includes('ECONNREFUSED') || error.message.includes('ENOTFOUND')) {
       return res.status(500).send('DATABASE_ISSUE');
     }
 
@@ -156,6 +166,7 @@ app.post('/login', async (req, res) => {
     return res.status(500).send('SERVER_ERROR');
   }
 });
+
 app.post('/request-password-reset', async (req, res) => {
   try {
     const { email } = req.body;
@@ -203,7 +214,7 @@ app.post('/reset-password/:token', async (req, res) => {
 
       let user = await Registeruser.findOne({
           resetPasswordToken: token,
-          resetPasswordExpires: { $gt: Date.now() }, // Ensure token has not expired
+          resetPasswordExpires: { $gt: Date.now() },
       });
 
       if (!user) {
@@ -224,19 +235,17 @@ app.post('/reset-password/:token', async (req, res) => {
 });
 
 
-
-
-// User Dashboard Route
 app.get('/userdashboard', middleware, async (req, res) => {
   try {
     let exist = await Registeruser.findById(req.user.id);
+    
     if (!exist) {
       return res.status(400).send('User not found');
     }
     if (exist.role !== 'user') {
       return res.status(403).send('Access denied: Users only');
     }
-    res.json({
+    return res.json({
       message: "Welcome to the User Dashboard",
       user:exist
     });
@@ -246,25 +255,6 @@ app.get('/userdashboard', middleware, async (req, res) => {
   }
 });
 
-app.get('/admindashboard', middleware, async (req, res) => {
-  try {
-    let exist = await Registeruser.findById(req.user.id);
-    if (!exist) {
-      return res.status(400).send('User not found');
-    }
-    // Check if the user has admin role
-    if (exist.role !== 'admin') {
-      return res.status(403).send('Access denied: Admins only');
-    }
-    res.json({
-      message: "Welcome to the Admin Dashboard",
-      user: exist
-    });
-  } catch (error) {
-    console.log(error);
-    return res.status(500).send('Server Error');
-  }
-});
 
 app.post('/registersuccess', async (req, res) => {
   try {
@@ -290,19 +280,6 @@ app.post('/registersuccess', async (req, res) => {
 // Add a new debate
 app.post('/debates', async (req, res) => {
   const { question, options, createdBy } = req.body;
-
-  if (!question || !options || options.length < 2 || options.length > 7) {
-    return res.status(400).json({
-      error: 'Invalid data. Question is required, and there should be 2 to 7 options.',
-    });
-  }
-
-  if (options.some(option => !option.trim())) {
-    return res.status(400).json({
-      error: 'All options must be filled out.',
-    });
-  }
-
   try {
     
     const newDebate = new Debate({
@@ -310,7 +287,16 @@ app.post('/debates', async (req, res) => {
       options,
       createdBy,
       createdAt: new Date(),
+      totalVotes: 0, 
     });
+
+    const user = await User.findOne({ username: createdBy });
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    user.totalDebatesCreated += 1;
+    await user.save();
     await newDebate.save();
     res.status(201).json({
       message: 'Debate created successfully.',
@@ -342,9 +328,19 @@ app.get('/debates',middleware, async (req, res) => {
   }
 });
 
-app.get('/alldebates',middleware, async (req, res) => {
+app.get('/alldebates', middleware, async (req, res) => {
   try {
-    const alldebates = await Debate.find();
+    const username = req.user.username;
+    const role = req.user.role;  // Assuming the role is available in the middleware
+    let query = {};
+
+    if (role === 'admin') {
+      query = {};  // Admin can see all debates including blocked
+    } else {
+      query = { createdBy: { $ne: username }, isblocked: false };  // User can't see their own debates or blocked ones
+    }
+
+    const alldebates = await Debate.find(query);
 
     if (alldebates.length === 0) {
       return res.status(404).json({ message: 'No debates found.' });
@@ -356,6 +352,198 @@ app.get('/alldebates',middleware, async (req, res) => {
     return res.status(500).json({ error: 'Failed to fetch debates.' });
   }
 });
+
+
+// Vote for a specific debate option
+app.post('/vote/:id', middleware, async (req, res) => {
+  const { id } = req.params;
+  const { votes } = req.body; 
+  const userId = req.user.id;
+
+  try {
+    const debate = await Debate.findById(id);
+    if (!debate) return res.status(404).json({ message: "Debate not found" });
+
+    const userVote = debate.votedUsers.find(user => user.userId === userId);
+
+    if (userVote) {
+      userVote.votes = votes;
+    } else {
+      debate.votedUsers.push({ userId, votes });
+    }
+    debate.options.forEach(option => {
+      option.votes = 0;
+    });
+    debate.votedUsers.forEach(user => {
+      user.votes.forEach(vote => {
+        const option = debate.options[vote.optionId];
+        if (option) {
+          option.votes += vote.voteCount;
+        }
+      });
+    });
+    debate.totalVotes = debate.options.reduce((total, option) => total + option.votes, 0);
+    await debate.save();
+
+    res.json({
+      totalVotes: debate.totalVotes,
+      options: debate.options,
+      userVotes: votes,
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+
+
+
+// Like a debate
+app.post('/like/:id', middleware, async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+
+
+  try {
+    const debate = await Debate.findById(id);
+    if (!debate) return res.status(404).json({ message: "Debate not found" });
+
+    if (debate.likedBy.includes(userId)) {
+      return res.status(400).json({ message: "You already liked this debate" });
+    }
+
+    debate.likes++;
+    debate.likedBy.push(userId);
+    await debate.save();
+    return res.json({ likes: debate.likes });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+
+app.post('/dislike/:id', middleware, async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+
+  try {
+    const debate = await Debate.findById(id);
+    if (!debate) return res.status(404).json({ message: "Debate not found" });
+
+    if (!debate.likedBy.includes(userId)) {
+      return res.status(400).json({ message: "You haven't liked this debate" });
+    }
+
+    debate.likes--;
+    debate.likedBy = debate.likedBy.filter(user => user !== userId);
+    await debate.save();
+    res.json({ likes: debate.likes });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+
+// Get a single debate by ID
+app.get('/debate/:id', middleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const debate = await Debate.findById(id);
+
+    if (!debate) {
+      return res.status(404).json({ error: 'Debate not found' });
+    }
+
+    res.status(200).json(debate);
+  } catch (error) {
+    console.error('Error fetching debate:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.get("/allusers", middleware, async (req, res) => {
+  try {
+    const users = await User.find({ username: { $ne: "Admin" } });
+    const updatedUsers = await Promise.all(
+      users.map(async (user) => {
+        const debates = await Debate.find({ createdBy: user.username });
+        const totalVotes = debates.reduce((sum, debate) => sum + (debate.totalVotes || 0), 0);
+        return {
+          ...user.toObject(),
+          totalVotes,
+        };
+      })
+    );
+    res.json(updatedUsers);
+  } catch (err) {
+    console.error("Error fetching users:", err);
+    res.status(500).json({ error: "Failed to fetch users." });
+  }
+});
+
+
+app.patch('/debate/block/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const debate = await Debate.findByIdAndUpdate(id, { isblocked: true }, { new: true });
+    if (!debate) {
+      return res.status(404).json({ message: 'Debate not found' });
+    }
+    res.json({ message: 'Debate blocked successfully', debate });
+  } catch (error) {
+    console.error('Error blocking debate:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+app.patch('/debate/:debateId/option/:optionId/remove', async (req, res) => {
+  try {
+    const { debateId, optionId } = req.params;
+    const debate = await Debate.findById(debateId);
+    if (!debate) {
+      return res.status(404).json({ message: 'Debate not found' });
+    }
+
+    const option = debate.options.id(optionId);
+    if (!option) {
+      return res.status(404).json({ message: 'Option not found' });
+    }
+
+    option.isremoved = true;
+    await debate.save();
+
+    res.json({ message: 'Option removed successfully', debate });
+  } catch (error) {
+    console.error('Error removing option:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+app.put("/blockuser/:id", async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const user = await User.findById(userId);
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    user.isblocked = !user.isblocked;
+    await user.save();
+
+    res.json({
+      message: user.isblocked ? "User blocked successfully" : "User unblocked successfully",
+      user,
+    });
+  } catch (error) {
+    console.error("Error blocking/unblocking user:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+
 
 app.listen(5000, () => {
   console.log('Server running...');
